@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+from .parser import ParsedListing
 from .state_tracker import FreshnessState, ListingRecord
 
 
@@ -48,6 +49,12 @@ def compute_kaplan_meier(
     This avoids survivor bias where long-lived listings already online at the baseline
     run are counted in early risk sets before they could have been observed.
 
+    Ages are whole days since posting. A withdrawn listing was last seen at
+    age ``last_seen``, so its withdrawal counts at ``last_seen + 1``; an active
+    listing is censored at its current age. A listing is at risk at age ``t``
+    when ``entry < t <= exit``: it was observed before ``t`` and its outcome
+    at ``t`` is known.
+
     Returns:
         (survival_curve: {time_days: survival_prob}, median_lifetime_days: float | None)
     """
@@ -67,8 +74,8 @@ def compute_kaplan_meier(
         entry_age = max(0, (first_seen_d - posted_d).days)
 
         if r.status == "withdrawn":
-            end_d = _parse_date(r.withdrawn_date) or _parse_date(r.last_seen) or first_seen_d
-            exit_age = max(entry_age, (end_d - posted_d).days)
+            last_seen_d = _parse_date(r.withdrawn_date) or _parse_date(r.last_seen) or first_seen_d
+            exit_age = max(entry_age, (last_seen_d - posted_d).days) + 1
             observations.append((entry_age, exit_age, 1))
         else:
             end_d = run_date
@@ -94,9 +101,8 @@ def compute_kaplan_meier(
 
     for t in event_times:
         d_t = events_at[t]
-        # Risk set n_t with left truncation:
-        # Subject must have entered by time t (entry_age <= t) and not yet exited before t (exit_age >= t)
-        n_t = sum(1 for entry_age, exit_age, _ in observations if entry_age <= t <= exit_age)
+        # Risk set with left truncation: observed before t, outcome at t known.
+        n_t = sum(1 for entry_age, exit_age, _ in observations if entry_age < t <= exit_age)
 
         if d_t > 0 and n_t > 0:
             survival_prob *= (1.0 - (d_t / n_t))
@@ -129,7 +135,12 @@ def calculate_metrics(
     state: FreshnessState,
     run_date_str: str,
     drift_warnings: list[str] | None = None,
+    snapshot: list[ParsedListing] | None = None,
 ) -> FreshnessMetrics:
+    """Survival comes from the tracked state, which the observation window
+    bounds. Age shares and expiry coverage describe the live listings, so they
+    come from the full ``snapshot`` when one is given (before the window
+    filter), and otherwise from the active listings in the state."""
     records = list(state.listings.values())
     total_listings = len(records)
     active_records = [r for r in records if r.status == "active"]
@@ -137,15 +148,20 @@ def calculate_metrics(
 
     run_date = _parse_date(run_date_str) or date.today()
 
-    # Active listings age distribution (based on posted date / datumVlozeni)
+    if snapshot is not None:
+        live = [(item.posted, item.expires) for item in snapshot if item.operation != "delete"]
+    else:
+        live = [(r.posted or r.first_seen, r.expires) for r in active_records]
+
+    # Live listings age distribution (based on posted date / datumVlozeni)
     count_older_90d = 0
     count_older_180d = 0
     count_older_365d = 0
     stale_active_count = 0
     active_with_expiry = 0
 
-    for r in active_records:
-        posted_d = _parse_date(r.posted) or _parse_date(r.first_seen)
+    for posted, expires in live:
+        posted_d = _parse_date(posted)
         if posted_d:
             age_days = (run_date - posted_d).days
             if age_days > 90:
@@ -155,18 +171,19 @@ def calculate_metrics(
             if age_days > 365:
                 count_older_365d += 1
 
-        if r.expires:
-            exp = _parse_date(r.expires)
+        if expires:
+            exp = _parse_date(expires)
             if exp:
                 active_with_expiry += 1
                 if run_date > exp:
                     stale_active_count += 1
 
     total_active = len(active_records)
-    share_90d = round((count_older_90d / total_active) * 100, 2) if total_active else 0.0
-    share_180d = round((count_older_180d / total_active) * 100, 2) if total_active else 0.0
-    share_365d = round((count_older_365d / total_active) * 100, 2) if total_active else 0.0
-    expiry_cov = round((active_with_expiry / total_active) * 100, 2) if total_active else 0.0
+    total_live = len(live)
+    share_90d = round((count_older_90d / total_live) * 100, 2) if total_live else 0.0
+    share_180d = round((count_older_180d / total_live) * 100, 2) if total_live else 0.0
+    share_365d = round((count_older_365d / total_live) * 100, 2) if total_live else 0.0
+    expiry_cov = round((active_with_expiry / total_live) * 100, 2) if total_live else 0.0
     # Kaplan-Meier survival with delayed entry
     survival_curve, median_days = compute_kaplan_meier(records, run_date_str)
 

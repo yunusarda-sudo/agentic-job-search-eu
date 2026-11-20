@@ -9,6 +9,14 @@ from pathlib import Path
 from .allowlist import AllowlistSecurityError, get_allowlisted_source
 from .metrics import calculate_metrics
 from .parser import parse_payload
+from .run_ledger import (
+    RunLedger,
+    ledger_path,
+    load_ledger,
+    record_failure,
+    record_success,
+    save_ledger,
+)
 from .reporter import (
     generate_markdown_summary,
     generate_run_log,
@@ -18,6 +26,28 @@ from .reporter import (
 from .state_tracker import load_state, save_state, update_state
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+#: A full snapshot with this many fewer listings than the previous one is
+#: treated as a broken download rather than mass withdrawal.
+MAX_SNAPSHOT_DROP = 0.20
+
+
+def snapshot_refusal(count: int, previous_count: int | None) -> str | None:
+    """Why a full snapshot of ``count`` listings must not update the state."""
+    if count == 0:
+        return "the snapshot has no listings"
+    if previous_count and count < previous_count * (1 - MAX_SNAPSHOT_DROP):
+        return (
+            f"the snapshot has {count:,} listings, more than "
+            f"{MAX_SNAPSHOT_DROP:.0%} fewer than the previous {previous_count:,}"
+        )
+    return None
+
+
+def refuse_run(path: Path, ledger: RunLedger, run_date: str, reason: str) -> int:
+    save_ledger(path, record_failure(ledger, run_date, reason))
+    print(f"ERROR: run refused, state left unchanged: {reason}", file=sys.stderr)
+    return 1
 
 
 def download_to_temp(url: str, dest_path: Path, timeout: int = 300) -> None:
@@ -50,6 +80,8 @@ def run_freshness_pipeline(
     c_dir = checks_dir or (REPO_ROOT / "reports" / "checks")
 
     print(f"=== Starting Freshness Check: {slug} [{run_date}] ===")
+    runs_path = ledger_path(s_dir, slug)
+    ledger = load_ledger(runs_path)
 
     # 1. Allowlist verification
     try:
@@ -84,11 +116,13 @@ def run_freshness_pipeline(
             if temp_download_path.exists():
                 temp_download_path.unlink()
             print(f"ERROR: Failed to fetch data from {endpoint}: {e}", file=sys.stderr)
-            return 1
+            return refuse_run(runs_path, ledger, run_date, f"download failed: {e}")
 
     try:
         # 3. Parse payload
         parse_result = parse_payload(payload_source, format_hint=format_hint)
+    except Exception as e:  # any parse error means the download cannot be trusted
+        return refuse_run(runs_path, ledger, run_date, f"the payload did not parse: {e}")
     finally:
         if temp_download_path and temp_download_path.exists():
             temp_download_path.unlink()
@@ -102,6 +136,14 @@ def run_freshness_pipeline(
     # 4. State Management
     state_path = s_dir / f"{slug}-state.json"
     state = load_state(state_path, slug=slug)
+    snapshot_count = None if is_incremental else len(parse_result.listings)
+    if snapshot_count is not None:
+        previous_count = ledger.last_snapshot_count
+        if previous_count is None:
+            previous_count = sum(1 for r in state.listings.values() if r.status == "active")
+        reason = snapshot_refusal(snapshot_count, previous_count)
+        if reason:
+            return refuse_run(runs_path, ledger, run_date, reason)
     updated_state = update_state(
         state=state,
         parsed_listings=parse_result.listings,
@@ -111,12 +153,15 @@ def run_freshness_pipeline(
     )
     save_state(state_path, updated_state)
     print(f"Updated state saved to {state_path}")
+    ledger = record_success(ledger, snapshot_count)
+    save_ledger(runs_path, ledger)
 
     # 5. Calculate Metrics
     metrics = calculate_metrics(
         state=updated_state,
         run_date_str=run_date,
         drift_warnings=parse_result.drift_warnings,
+        snapshot=None if is_incremental else parse_result.listings,
     )
 
     # 6. Generate Summary & Logs
@@ -127,6 +172,8 @@ def run_freshness_pipeline(
         endpoint=endpoint,
         metrics=metrics,
         run_date=run_date,
+        successful_runs=ledger.successful_runs,
+        last_failed_run=ledger.last_failed_run,
     )
     save_markdown_summary(summary_path, summary_md)
     print(f"Summary report generated at {summary_path}")
@@ -155,6 +202,8 @@ def run_freshness_pipeline(
     print(f"Expiry Coverage: {metrics.expiry_coverage_ratio}% ({metrics.active_with_expiry} listings)")
     print(f"Active Past Expiry: {metrics.stale_active_count} listings")
     print(f"Schema Drift:    {'YES' if metrics.schema_drift_detected else 'NO'}")
+    print(f"Successful Runs: {ledger.successful_runs}")
+    print(f"Last Failed Run: {ledger.last_failed_run or 'None'}")
 
     if strict_drift and metrics.schema_drift_detected:
         print("Failing due to --strict-drift flag.")

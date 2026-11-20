@@ -26,20 +26,23 @@ SUMMARY_TEMPLATE = r"""# Listing Freshness & Persistence Report: {source_name} (
 | **30-Day Survival Probability** | {survival_30d} | Kaplan-Meier $S(30)$ accounting for delayed entry & right-censoring |
 | **60-Day Survival Probability** | {survival_60d} | Kaplan-Meier $S(60)$ accounting for delayed entry & right-censoring |
 | **90-Day Survival Probability** | {survival_90d} | Kaplan-Meier $S(90)$ accounting for delayed entry & right-censoring |
-| **Active Age > 90 Days** | {share_older_90d} ({count_older_90d:,} listings) | Share of active vacancies posted > 90 days ago (`datumVlozeni`) |
-| **Active Age > 180 Days** | {share_older_180d} ({count_older_180d:,} listings) | Share of active vacancies posted > 180 days ago (`datumVlozeni`) |
-| **Active Age > 365 Days** | {share_older_365d} ({count_older_365d:,} listings) | Share of active vacancies posted > 365 days ago (`datumVlozeni`) |
-| **Expiry Date Coverage** | {expiry_coverage_ratio} ({active_with_expiry:,} listings) | Proportion of active vacancies with explicit expiration date |
+| **Active Age > 90 Days** | {share_older_90d} ({count_older_90d:,} listings) | Share of the full snapshot posted > 90 days ago (`datumVlozeni`) |
+| **Active Age > 180 Days** | {share_older_180d} ({count_older_180d:,} listings) | Share of the full snapshot posted > 180 days ago (`datumVlozeni`) |
+| **Active Age > 365 Days** | {share_older_365d} ({count_older_365d:,} listings) | Share of the full snapshot posted > 365 days ago (`datumVlozeni`) |
+| **Expiry Date Coverage** | {expiry_coverage_ratio} ({active_with_expiry:,} listings) | Proportion of the full snapshot with explicit expiration date |
 | **Active Past Stated Expiry** | {stale_active_count:,} listings | Count of active vacancies whose stated expiry has passed |
 | **Schema Contract Integrity** | {drift_badge} | Structural validation of upstream response schema |
+| **Successful Runs** | {successful_runs:,} | Runs that updated the tracked state |
+| **Last Failed Run** | {last_failed_run} | Most recent run refused before it could change the state |
 
 {drift_section}
 
 ## 2. Statistical Methodology
 
-* **Left-Truncation & Right-Censoring (Kaplan-Meier):** Listings already online at baseline enter observation at `first_seen` (delayed entry: entry time $a_i = \text{{first\_seen}} - \text{{posted}}$). Counting them from `posted` without left truncation biases early survival upwards. This report implements the left-truncated Kaplan-Meier estimator ($S(t) = \prod_{{t_i \le t}} (1 - d_i/n_i)$) where risk set $n_i$ requires $a_k \le t_i \le \text{{exit}}_k$.
+* **Left-Truncation & Right-Censoring (Kaplan-Meier):** Listings already online at baseline enter observation at `first_seen` (delayed entry: entry time $a_i = \text{{first\_seen}} - \text{{posted}}$). Counting them from `posted` without left truncation biases early survival upwards. This report implements the left-truncated Kaplan-Meier estimator ($S(t) = \prod_{{t_i \le t}} (1 - d_i/n_i)$) where risk set $n_i$ requires $a_k < t_i \le \text{{exit}}_k$. A withdrawal counts at age $\text{{last\_seen}} + 1$, and an active listing is censored at its current age, so a listing is only at risk at ages whose outcome is known.
 * **Discrete Day Resolution:** Upstream timestamps operate on discrete calendar days (`YYYY-MM-DD`). Lifetimes are bounded to non-negative integer days.
-* **Fixed Observation Window (365 Days):** To prevent survivor bias from asymmetric retention, both active and withdrawn listings outside the 365-day window from run date are pruned equally.
+* **Fixed Observation Window (365 Days):** To prevent survivor bias from asymmetric retention, both active and withdrawn listings outside the 365-day window from run date are pruned equally. The window applies to the survival estimate only; age shares and expiry coverage are measured on the full snapshot.
+* **Refused Runs:** A run whose download does not parse, yields no listings, or drops more than 20% of the listings against the previous run exits non-zero and leaves the state unchanged.
 * **Git Diff Minimization:** Active listings do not store mutable `last_seen` timestamps (implicit in run date). State records are stored in sorted single-line JSON format, restricting daily git commits strictly to newly added and withdrawn records.
 * **Raw Logs:** Ephemeral run logs are stored as 90-day GitHub Actions artifacts rather than polluting git history.
 """
@@ -57,6 +60,8 @@ def generate_markdown_summary(
     endpoint: str,
     metrics: FreshnessMetrics,
     run_date: str,
+    successful_runs: int = 0,
+    last_failed_run: dict[str, str] | None = None,
 ) -> str:
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -100,6 +105,10 @@ def generate_markdown_summary(
         stale_active_count=metrics.stale_active_count,
         drift_badge=drift_badge,
         drift_section=drift_section,
+        successful_runs=successful_runs,
+        last_failed_run=(
+            f"{last_failed_run['date']}: {last_failed_run['reason']}" if last_failed_run else "None"
+        ),
     )
 
 

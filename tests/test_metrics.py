@@ -15,9 +15,9 @@ class TestMetrics(unittest.TestCase):
         """
         Verify Kaplan-Meier against an exact hand-calculated benchmark:
         10 listings observed starting at 2026-09-01:
-        - 2 withdrawn at t=10 (withdrawn_date: 2026-09-11)
+        - 2 withdrawn at t=10 (last seen 2026-09-10, the day before)
         - 2 active (censored) at t=15 (run_date: 2026-09-16) -> we set their run date for observation
-        - 3 withdrawn at t=20 (withdrawn_date: 2026-09-21)
+        - 3 withdrawn at t=20 (last seen 2026-09-20, the day before)
         - 3 active (censored) at t=30 (run_date: 2026-10-01)
         """
         run_date = "2026-10-01"
@@ -29,11 +29,11 @@ class TestMetrics(unittest.TestCase):
                 ListingRecord(
                     listing_id=f"W10_{i}",
                     first_seen="2026-09-01",
-                    last_seen="2026-09-11",
+                    last_seen="2026-09-10",
                     posted="2026-09-01",
                     expires=None,
                     status="withdrawn",
-                    withdrawn_date="2026-09-11",
+                    withdrawn_date="2026-09-10",
                 )
             )
 
@@ -50,17 +50,17 @@ class TestMetrics(unittest.TestCase):
                 )
             )
 
-        # 3 withdrawn at day 20 (posted 2026-09-01, withdrawn 2026-09-21)
+        # 3 withdrawn at day 20 (posted 2026-09-01, last seen 2026-09-20)
         for i in range(3):
             records.append(
                 ListingRecord(
                     listing_id=f"W20_{i}",
                     first_seen="2026-09-01",
-                    last_seen="2026-09-21",
+                    last_seen="2026-09-20",
                     posted="2026-09-01",
                     expires=None,
                     status="withdrawn",
-                    withdrawn_date="2026-09-21",
+                    withdrawn_date="2026-09-20",
                 )
             )
 
@@ -117,13 +117,13 @@ class TestMetrics(unittest.TestCase):
         and does not inflate the risk set before its entry age.
         """
         run_date = "2026-10-01"
-        # Listing 1: posted 2026-09-01, first_seen 2026-09-01 (entry_age=0), withdrawn 2026-09-11 (exit_age=10) -> event
+        # Listing 1: posted 2026-09-01, first_seen 2026-09-01 (entry_age=0), last seen 2026-09-10, withdrawn at age 10 -> event
         r1 = ListingRecord(
             listing_id="R1",
             first_seen="2026-09-01",
             posted="2026-09-01",
             status="withdrawn",
-            withdrawn_date="2026-09-11",
+            withdrawn_date="2026-09-10",
         )
         # Listing 2: posted 2026-08-01, first_seen 2026-09-01 (entry_age=31), active at 2026-10-01 (exit_age=61)
         # R2 enters at t=31, so at t=10 it is NOT at risk.
